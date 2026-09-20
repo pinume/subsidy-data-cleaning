@@ -7,10 +7,10 @@ use crate::model::{Column, ColumnType, DecimalScale, Fill, ProcessError, Table, 
 fn base_format(ty: ColumnType) -> Format {
     let format = Format::new()
         .set_font_name("微软雅黑")
-        .set_font_size(11)
+        .set_font_size(10)
         .set_align(FormatAlign::VerticalCenter)
         .set_border(FormatBorder::Thin)
-        .set_border_color(Color::RGB(0xD9D9D9));
+        .set_border_color(Color::RGB(0xDDE3EA));
 
     match ty {
         ColumnType::Text => format.set_align(FormatAlign::Left),
@@ -33,11 +33,12 @@ fn base_format(ty: ColumnType) -> Format {
 }
 
 /// 按列类型确定数字格式，再按行填色叠加背景色；`rust_xlsxwriter`会自动去重相同的`Format`。
-fn cell_format(column: &Column, fill: Option<Fill>) -> Format {
+fn cell_format(column: &Column, fill: Option<Fill>, alternate: bool) -> Format {
     let format = base_format(column.ty);
     match fill {
         Some(Fill::Yellow) => format.set_background_color(Color::RGB(0xFFEB9C)),
         Some(Fill::Pink) => format.set_background_color(Color::RGB(0xFFC7CE)),
+        None if alternate => format.set_background_color(Color::RGB(0xF3F6FA)),
         None => format,
     }
 }
@@ -53,15 +54,18 @@ pub fn write_table(table: &Table, path: &Path) -> Result<(), ProcessError> {
         .set_font_size(11)
         .set_bold()
         .set_font_color(Color::White)
-        .set_background_color(Color::RGB(0x5B9BD5))
-        .set_align(FormatAlign::Left)
+        .set_background_color(Color::RGB(0x1F4E78))
+        .set_align(FormatAlign::Center)
         .set_align(FormatAlign::VerticalCenter)
         .set_border(FormatBorder::Thin)
-        .set_border_color(Color::RGB(0xD9D9D9));
+        .set_border_color(Color::RGB(0x17365D));
 
-    worksheet.set_default_row_height(22);
     worksheet
-        .set_row_height(0, 30)
+        .set_default_row_height(20)
+        .set_screen_gridlines(false)
+        .set_zoom(90);
+    worksheet
+        .set_row_height(0, 36)
         .map_err(|error| ProcessError::Io(std::io::Error::other(error)))?;
     worksheet
         .set_freeze_panes(1, 0)
@@ -73,73 +77,65 @@ pub fn write_table(table: &Table, path: &Path) -> Result<(), ProcessError> {
             .map_err(|error| ProcessError::Io(std::io::Error::other(error)))?;
     }
 
+    let column_formats: Vec<_> = table
+        .columns
+        .iter()
+        .map(|column| {
+            [
+                cell_format(column, None, false),
+                cell_format(column, None, true),
+                cell_format(column, Some(Fill::Yellow), false),
+                cell_format(column, Some(Fill::Pink), false),
+            ]
+        })
+        .collect();
+
     for (row_index, row) in table.rows.iter().enumerate() {
         let excel_row = (row_index + 1) as u32;
+        let format_index = match row.fill {
+            Some(Fill::Yellow) => 2,
+            Some(Fill::Pink) => 3,
+            None if row_index % 2 == 1 => 1,
+            None => 0,
+        };
         for (col_index, value) in row.values.iter().enumerate() {
-            let column = &table.columns[col_index];
             let col = col_index as u16;
-            let format = cell_format(column, row.fill);
+            let format = &column_formats[col_index][format_index];
             let result = match value {
-                Value::Empty => worksheet.write_blank(excel_row, col, &format).map(|_| ()),
+                Value::Empty => worksheet.write_blank(excel_row, col, format).map(|_| ()),
                 Value::Text(text) => worksheet
-                    .write_with_format(excel_row, col, text, &format)
+                    .write_with_format(excel_row, col, text, format)
                     .map(|_| ()),
                 Value::Decimal(amount) => worksheet
-                    .write_with_format(excel_row, col, *amount, &format)
+                    .write_with_format(excel_row, col, *amount, format)
                     .map(|_| ()),
                 Value::Integer(number) => worksheet
-                    .write_with_format(excel_row, col, *number, &format)
+                    .write_with_format(excel_row, col, *number, format)
                     .map(|_| ()),
                 Value::Ratio(ratio) => worksheet
-                    .write_with_format(excel_row, col, *ratio, &format)
+                    .write_with_format(excel_row, col, *ratio, format)
                     .map(|_| ()),
                 Value::Date(date) => worksheet
-                    .write_with_format(excel_row, col, date, &format)
+                    .write_with_format(excel_row, col, date, format)
                     .map(|_| ()),
                 Value::Time(time) => worksheet
-                    .write_with_format(excel_row, col, time, &format)
+                    .write_with_format(excel_row, col, time, format)
                     .map(|_| ()),
                 Value::DateTime(datetime) => worksheet
-                    .write_with_format(excel_row, col, datetime, &format)
+                    .write_with_format(excel_row, col, datetime, format)
                     .map(|_| ()),
             };
             result.map_err(|error| ProcessError::Io(std::io::Error::other(error)))?;
         }
     }
 
-    worksheet
-        .set_autofit_max_row(200)
-        .set_autofit_max_width(300)
-        .autofit();
-
-    let widths: &[f64] = match table.columns.as_slice() {
-        columns
-            if columns.len() == 26
-                && columns[0].name == "清算时间"
-                && columns[25].name == "买家ID" =>
-        {
-            &[
-                20.0, 20.0, 14.0, 12.0, 22.0, 14.0, 14.0, 12.0, 12.0, 12.0, 16.0, 18.0, 12.0, 16.0,
-                18.0, 24.0, 16.0, 28.0, 28.0, 14.0, 16.0, 14.0, 14.0, 14.0, 16.0, 18.0,
-            ]
-        }
-        columns
-            if columns.len() == 24
-                && columns[0].name == "拨付批次"
-                && columns[23].name == "原拨付批次" =>
-        {
-            &[
-                32.0, 20.0, 16.0, 26.0, 26.0, 22.0, 18.0, 14.0, 14.0, 14.0, 14.0, 12.0, 24.0, 14.0,
-                16.0, 12.0, 16.0, 36.0, 14.0, 24.0, 18.0, 24.0, 48.0, 18.0,
-            ]
-        }
-        _ => &[],
-    };
-    for (col, width) in widths.iter().enumerate() {
+    if let Some(last_col) = table.columns.len().checked_sub(1) {
         worksheet
-            .set_column_width(col as u16, *width)
+            .autofilter(0, 0, table.rows.len() as u32, last_col as u16)
             .map_err(|error| ProcessError::Io(std::io::Error::other(error)))?;
     }
+
+    worksheet.set_autofit_max_width(420).autofit();
 
     workbook
         .save(path)

@@ -34,7 +34,7 @@ data-cleaning/
 │   │   ├── mod.rs
 │   │   ├── paths.rs           # 路径解析与校验、文件名识别、输出路径计算
 │   │   ├── xlsx_reader.rs     # calamine 读取；按绝对行列号取值
-│   │   ├── xlsx_writer.rs     # rust_xlsxwriter：类型、数字格式、整行填色
+│   │   ├── xlsx_writer.rs     # rust_xlsxwriter：类型、样式、列宽、筛选与冻结表头
 │   │   └── publisher.rs       # 临时文件 → 备份 → 替换 → 失败恢复
 │   │
 │   ├── jobs/                  # 各数据类别的处理规则
@@ -74,7 +74,7 @@ data-cleaning/
 | `model::*` | 定义错误、单元格值、列定义、行、表和填色 | 不依赖`io`、`jobs` |
 | `io::paths` | 解析用户路径（去首尾空白与成对引号），校验存在、是目录、可读；只列出直接子级`.xlsx`，排除`~$`；计算输出目录与文件名 | 不递归，不修改源目录 |
 | `io::xlsx_reader` | 打开工作簿，枚举工作表，提供按绝对行列号访问的`SheetGrid` | 只负责读取，不做业务判断 |
-| `io::xlsx_writer` | 把`Table`写成单工作表XLSX临时文件，按列类型设置格式，按行填色 | 不负责正式文件替换 |
+| `io::xlsx_writer` | 把`Table`写成单工作表XLSX临时文件，设置数据格式、行填色、筛选、冻结表头和自适应列宽 | 不负责正式文件替换 |
 | `io::publisher` | 确认临时文件已生成后替换正式文件；任一步失败恢复原文件并清理临时文件 | 只操作当前类别的结果文件 |
 | `jobs::*` | 按project.md对应章节实现文件识别补充校验、表头校验、字段映射、合并、匹配、排序与行标记 | 输入为源目录，输出为`Table`；不直接写文件 |
 | `utils::*` | 日期、金额、文本、自然排序、单据号等纯函数 | 不访问文件系统，便于单元测试 |
@@ -148,7 +148,7 @@ pub struct Table { pub columns: Vec<Column>, pub rows: Vec<Row> }
 ```
 
 - `Integer`与`Decimal`分开，数量不以`Decimal("1")`表示；`Ratio`与`Decimal`分开，因为“0.15元”和“15%”业务含义不同。
-- `xlsx_writer`只根据`ColumnType`决定格式，不根据字段名猜测。
+- `xlsx_writer`只根据`ColumnType`决定数据格式，不根据字段名猜测；表头使用单行深蓝样式，普通明细使用斑马纹，`Fill`指定的黄色或粉色优先。
 - 金额列需要区分“保留原精度”和“固定两位小数”，因此`Decimal`带`DecimalScale`参数。
 - 同一列允许`Empty`与该列类型的值并存；除第8.4节`其他支付`的`Text("-")`外，任务不得在数值列写入文本。
 - 日期类列的源值无法识别、且project.md要求“保留原值”时（第5、6节），该单元格写为`Text`原值；要求“终止处理”时（第9、10节），任务返回错误。
