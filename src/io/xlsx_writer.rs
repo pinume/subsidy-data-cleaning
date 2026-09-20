@@ -16,18 +16,12 @@ fn base_format(ty: ColumnType) -> Format {
     }
 }
 
-fn fill_color(fill: Fill) -> Color {
-    match fill {
-        Fill::Yellow => Color::RGB(0xFFEB9C),
-        Fill::Pink => Color::RGB(0xFFC7CE),
-    }
-}
-
 /// 按列类型确定数字格式，再按行填色叠加背景色；`rust_xlsxwriter`会自动去重相同的`Format`。
 fn cell_format(column: &Column, fill: Option<Fill>) -> Format {
     let format = base_format(column.ty);
     match fill {
-        Some(fill) => format.set_background_color(fill_color(fill)),
+        Some(Fill::Yellow) => format.set_background_color(Color::RGB(0xFFEB9C)),
+        Some(Fill::Pink) => format.set_background_color(Color::RGB(0xFFC7CE)),
         None => format,
     }
 }

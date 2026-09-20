@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use rust_decimal::Decimal;
@@ -260,6 +260,27 @@ fn is_return(transaction_type: &str) -> bool {
     matches!(transaction_type, "消费撤销" | "消费撤消" | "联机退货")
 }
 
+/// 退单按非空`检索号`回溯唯一的原`消费`记录；无命中或同号多条消费时不任选。
+fn returned_original_refs(records: &[UnionPayRecord]) -> HashSet<String> {
+    let mut consumption_counts: HashMap<&str, usize> = HashMap::new();
+    for record in records
+        .iter()
+        .filter(|r| r.transaction_type == "消费" && !r.retrieval_no.is_empty())
+    {
+        *consumption_counts.entry(&record.retrieval_no).or_default() += 1;
+    }
+
+    records
+        .iter()
+        .filter(|r| is_return(&r.transaction_type))
+        .filter(|r| {
+            !r.retrieval_no.is_empty()
+                && consumption_counts.get(r.retrieval_no.as_str()) == Some(&1)
+        })
+        .map(|r| r.retrieval_no.clone())
+        .collect()
+}
+
 fn to_row(record: UnionPayRecord, fill: Option<Fill>) -> Row {
     let values = vec![
         record.settlement_date,
@@ -317,11 +338,14 @@ impl Job for UnionPayJob {
 
     fn run(&self, input_dir: &Path) -> Result<Table, ProcessError> {
         let records = load_records(input_dir)?;
+        let returned_original_refs = returned_original_refs(&records);
 
-        // 稳定分区：先收集未沉底行，再收集沉底行，各自保持原相对顺序。
-        let (normal, returned): (Vec<_>, Vec<_>) = records
-            .into_iter()
-            .partition(|r| !is_return(&r.transaction_type));
+        // 稳定分区：退单及其唯一原消费一并沉底，两个区域各自保持原相对顺序。
+        let (normal, returned): (Vec<_>, Vec<_>) = records.into_iter().partition(|r| {
+            !is_return(&r.transaction_type)
+                && !(r.transaction_type == "消费"
+                    && returned_original_refs.contains(&r.retrieval_no))
+        });
 
         let rows = normal
             .into_iter()
@@ -385,6 +409,7 @@ mod tests {
         order_no: &'a str,
         transaction_type: &'a str,
         remark: &'a str,
+        retrieval_no: &'a str,
     ) -> [&'a str; 26] {
         [
             "20260914",
@@ -398,7 +423,7 @@ mod tests {
             "0.50",
             "0.50",
             "SN0001",
-            "16867252734N",
+            retrieval_no,
             "借记卡",
             "工商银行",
             "89813014812B06R",
@@ -436,14 +461,14 @@ mod tests {
             &dir.join("89813014812B06R_MX_20260914101809_1.xlsx"),
             "汇总1",
             &[
-                sample_row("ORDER-A", "消费", ""),
-                sample_row("ORDER-B", "消费撤消", "原备注"),
+                sample_row("ORDER-A", "消费", "", "16867252734N"),
+                sample_row("ORDER-B", "消费撤消", "原备注", "16867252734N"),
             ],
         );
         write_workbook(
             &dir.join("89813015722APT1_MX_20260914101900_1.xlsx"),
             "汇总2",
-            &[sample_row("ORDER-C", "消费", "")],
+            &[sample_row("ORDER-C", "消费", "", "16867252735N")],
         );
         // 不符合命名规则的文件必须被忽略。
         std::fs::write(dir.join("说明.xlsx"), b"not a real workbook").unwrap();
@@ -463,13 +488,40 @@ mod tests {
                 _ => panic!("expected text"),
             })
             .collect();
-        // 正常交易保持合并顺序（89813014812B06R 先于 89813015722APT1），退货沉底。
-        assert_eq!(order_nos, vec!["ORDER-A", "ORDER-C", "ORDER-B"]);
+        // 未退消费在前；被退原消费和退单沉底，沉底区域保持原相对顺序。
+        assert_eq!(order_nos, vec!["ORDER-C", "ORDER-A", "ORDER-B"]);
 
-        let returned_row = &table.rows[2];
-        assert_eq!(returned_row.fill, Some(Fill::Pink));
-        assert_eq!(returned_row.values[24], Value::Text("已退货".to_string()));
+        for returned_row in &table.rows[1..] {
+            assert_eq!(returned_row.fill, Some(Fill::Pink));
+            assert_eq!(returned_row.values[24], Value::Text("已退货".to_string()));
+        }
         assert_eq!(table.rows[0].fill, None);
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn ambiguous_original_consumptions_are_not_marked_as_returned() {
+        let dir = unique_temp_path("unionpay-ambiguous-original");
+        std::fs::create_dir_all(&dir).unwrap();
+        write_workbook(
+            &dir.join("89813014812B06R_MX_20260914101809_1.xlsx"),
+            "汇总",
+            &[
+                sample_row("ORDER-A", "消费", "原备注A", "16867252734N"),
+                sample_row("ORDER-B", "消费", "原备注B", "16867252734N"),
+                sample_row("ORDER-C", "联机退货", "退单原备注", "16867252734N"),
+            ],
+        );
+
+        let table = UnionPayJob.run(&dir).unwrap();
+
+        assert_eq!(table.rows[0].fill, None);
+        assert_eq!(table.rows[0].values[24], Value::Text("原备注A".to_string()));
+        assert_eq!(table.rows[1].fill, None);
+        assert_eq!(table.rows[1].values[24], Value::Text("原备注B".to_string()));
+        assert_eq!(table.rows[2].fill, Some(Fill::Pink));
+        assert_eq!(table.rows[2].values[24], Value::Text("已退货".to_string()));
 
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -510,7 +562,11 @@ mod tests {
         let dir = unique_temp_path("unionpay-bad-notice");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("89813014812B06R_MX_20260914101809_1.xlsx");
-        write_workbook(&path, "汇总", &[sample_row("ORDER-A", "消费", "")]);
+        write_workbook(
+            &path,
+            "汇总",
+            &[sample_row("ORDER-A", "消费", "", "16867252734N")],
+        );
 
         // 破坏末行提示文字。
         let mut workbook = Workbook::new();
@@ -520,7 +576,7 @@ mod tests {
         for (col, header) in HEADERS.iter().enumerate() {
             sheet.write_string(1, col as u16, *header).unwrap();
         }
-        write_row(sheet, 2, &sample_row("ORDER-A", "消费", ""));
+        write_row(sheet, 2, &sample_row("ORDER-A", "消费", "", "16867252734N"));
         sheet.write_string(3, 0, "不是规定的提示文字").unwrap();
         workbook.save(&path).unwrap();
 
@@ -535,7 +591,7 @@ mod tests {
         let dir = unique_temp_path("unionpay-duplicate");
         std::fs::create_dir_all(&dir).unwrap();
 
-        let rows = [sample_row("ORDER-A", "消费", "")];
+        let rows = [sample_row("ORDER-A", "消费", "", "16867252734N")];
         write_workbook(
             &dir.join("89813014812B06R_MX_20260914101809_1.xlsx"),
             "汇总",

@@ -11,8 +11,8 @@ use crate::model::{Column, ColumnType, Fill, ProcessError, Row, Table, Value};
 use crate::utils::{numbers, text};
 
 use super::{
-    Category, Job, MultiValueIndex, PriorityOutcome, build_match_doc_no, cell_display, cell_text,
-    data_error, parse_date_field, resolve, resolve_via, text_value, unique_hit,
+    Category, Job, MultiValueIndex, PriorityOutcome, build_match_doc_no, cell_text, data_error,
+    parse_date_field, resolve, resolve_via, text_value, unique_hit,
 };
 use super::{invoice, receipts, unionpay, uploaded};
 
@@ -107,7 +107,7 @@ impl Job for CouponsJob {
         let sheet = &sheets[0];
         let sheet_name = sheet.name().to_string();
 
-        let title = cell_display(&sheet.cell(1, 1));
+        let title = sheet.cell(1, 1).to_string();
         if title != TITLE {
             return Err(ProcessError::Structure {
                 file: FILE_NAME.to_string(),
@@ -126,7 +126,7 @@ impl Job for CouponsJob {
         }
 
         let last_row = sheet.last_value_row().unwrap_or(2);
-        let total_marker = cell_display(&sheet.cell(last_row, 1));
+        let total_marker = sheet.cell(last_row, 1).to_string();
         if total_marker != "合计" {
             return Err(ProcessError::Structure {
                 file: FILE_NAME.to_string(),
@@ -300,7 +300,7 @@ fn parse_subsidy(
             sheet,
             row,
             "合计",
-            cell_display(cell),
+            cell.to_string(),
             "补贴额为空或无法解析为数值".to_string(),
         ));
     };
@@ -310,7 +310,7 @@ fn parse_subsidy(
             sheet,
             row,
             "合计",
-            cell_display(cell),
+            cell.to_string(),
             "金额与最接近的两位小数之差超出0.000001元容差".to_string(),
         )
     })
@@ -325,7 +325,7 @@ fn read_row(
     let text_at = |col: u32, field: &'static str| -> Result<String, ProcessError> {
         let cell = sheet.cell(row, col);
         cell_text(&cell)
-            .map_err(|detail| data_error(file, sheet_name, row, field, cell_display(&cell), detail))
+            .map_err(|detail| data_error(file, sheet_name, row, field, cell.to_string(), detail))
     };
 
     Ok(CouponRecord {

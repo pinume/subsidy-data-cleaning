@@ -12,7 +12,7 @@ use crate::model::{Column, ColumnType, DecimalScale, Fill, ProcessError, Row, Ta
 use super::refund::{REFUND_APPLIANCE, REFUND_DIGITAL};
 use super::{
     Category, Job, MultiValueIndex, PriorityOutcome, amount_value, cell_amount, cell_date_or_text,
-    cell_datetime_or_text, cell_display, cell_text, check_duplicate_fingerprint, data_error,
+    cell_datetime_or_text, cell_text, check_duplicate_fingerprint, data_error,
     resolve_synonym_column, resolve_via, text_value,
 };
 
@@ -267,12 +267,6 @@ fn matches_filename(name: &str, merchant_no: &str) -> bool {
     name.starts_with(&format!("MER_{merchant_no}_")) && name.ends_with(".xlsx")
 }
 
-/// 在“第26列起”的范围内按名称查找某统一字段的实际列号：候选同义词中恰好一个出现时
-/// 返回该列号；均未出现时返回`None`；多个同义词同时出现视为结构异常。
-fn resolve_tail_column(tail_domain: &[String], synonyms: &[&str]) -> Result<Option<u32>, String> {
-    resolve_synonym_column(tail_domain, synonyms).map(|opt| opt.map(|col| FRONT_LEN as u32 + col))
-}
-
 /// 前25列须按固定列位置与名称完全一致；第26列起按名称在其范围内查找（第5.1节：
 /// 数据组内部存在“电脑”等表头变体，不能仅按固定列号映射）。
 fn resolve_columns(sheet: &SheetGrid, config: &UploadedConfig) -> Result<Vec<Option<u32>>, String> {
@@ -290,7 +284,8 @@ fn resolve_columns(sheet: &SheetGrid, config: &UploadedConfig) -> Result<Vec<Opt
     let tail_domain = &header[FRONT_LEN..];
     let mut tail_columns = Vec::with_capacity(TAIL_LEN);
     for field in config.tail {
-        let resolved = resolve_tail_column(tail_domain, field.synonyms)?;
+        let resolved =
+            resolve_synonym_column(tail_domain, field.synonyms)?.map(|col| FRONT_LEN as u32 + col);
         if resolved.is_none() && field.required {
             return Err(format!("缺少必需字段：{}", field.name));
         }
@@ -310,11 +305,11 @@ fn read_typed_cell(
     Ok(match ty {
         ColumnType::Date => cell_date_or_text(cell),
         ColumnType::DateTime => cell_datetime_or_text(cell),
-        ColumnType::Decimal(_) => cell_amount(cell).map(amount_value).map_err(|detail| {
-            data_error(file, sheet_name, row, field, cell_display(cell), detail)
-        })?,
+        ColumnType::Decimal(_) => cell_amount(cell)
+            .map(amount_value)
+            .map_err(|detail| data_error(file, sheet_name, row, field, cell.to_string(), detail))?,
         _ => text_value(cell_text(cell).map_err(|detail| {
-            data_error(file, sheet_name, row, field, cell_display(cell), detail)
+            data_error(file, sheet_name, row, field, cell.to_string(), detail)
         })?),
     })
 }
@@ -334,7 +329,7 @@ fn read_row(
             sheet_name,
             row,
             "商户号",
-            cell_display(&merchant_cell),
+            merchant_cell.to_string(),
             detail,
         )
     })?;

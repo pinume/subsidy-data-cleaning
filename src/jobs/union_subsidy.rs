@@ -7,8 +7,8 @@ use crate::model::{Column, ColumnType, DecimalScale, ProcessError, Row, Table, V
 use crate::utils::natural_sort;
 
 use super::{
-    Category, Job, amount_value, cell_amount, cell_display, cell_text, check_duplicate_fingerprint,
-    data_error, parse_date_field, parse_time_field, text_value,
+    Category, Job, amount_value, cell_amount, cell_text, check_duplicate_fingerprint, data_error,
+    parse_date_field, parse_time_field, text_value,
 };
 
 const HEADERS: [&str; 33] = [
@@ -117,13 +117,13 @@ fn read_row(
     let text_at = |col: u32, field: &'static str| -> Result<String, ProcessError> {
         let cell = sheet.cell(row, col);
         cell_text(&cell)
-            .map_err(|detail| data_error(file, sheet_name, row, field, cell_display(&cell), detail))
+            .map_err(|detail| data_error(file, sheet_name, row, field, cell.to_string(), detail))
     };
     let amount_at = |col: u32, field: &'static str| -> Result<Value, ProcessError> {
         let cell = sheet.cell(row, col);
         cell_amount(&cell)
             .map(amount_value)
-            .map_err(|detail| data_error(file, sheet_name, row, field, cell_display(&cell), detail))
+            .map_err(|detail| data_error(file, sheet_name, row, field, cell.to_string(), detail))
     };
 
     let values = vec![

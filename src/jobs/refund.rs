@@ -9,7 +9,7 @@ use crate::io::xlsx_reader::{RawCell, SheetGrid, open_sheets};
 use crate::model::{Column, ColumnType, DecimalScale, Fill, ProcessError, Row, Table, Value};
 
 use super::{
-    Category, Job, amount_value, cell_amount, cell_display, cell_text, data_error,
+    Category, Job, amount_value, cell_amount, cell_text, data_error, pick_unique_latest,
     resolve_synonym_column, text_value,
 };
 
@@ -85,8 +85,6 @@ struct RefundConfig {
     required_indices: &'static [usize],
     /// 重复分组依据字段的索引，按优先级排列。
     grouping_priority: [usize; 3],
-    /// 是否允许"其他支付"保留文本`-`（数码回款明细特有）。
-    allow_dash_other_payment: bool,
     /// 只保留`核销商编`精确等于该值的明细行，其余门店编码的记录在读取阶段即排除，
     /// 不参与后续合并、去重或输出。
     dealer_code: &'static str,
@@ -131,7 +129,6 @@ const APPLIANCE_CONFIG: RefundConfig = RefundConfig {
     field_synonyms: APPLIANCE_SYNONYMS,
     required_indices: &APPLIANCE_REQUIRED,
     grouping_priority: [4, 3, 19], // 交易订单号 → 商户订单号 → 发票号
-    allow_dash_other_payment: false,
     dealer_code: "89813015722APT1",
 };
 
@@ -172,7 +169,6 @@ const DIGITAL_CONFIG: RefundConfig = RefundConfig {
     field_synonyms: DIGITAL_SYNONYMS,
     required_indices: &DIGITAL_REQUIRED,
     grouping_priority: [2, 3, 19], // 交易参考号 → 商户订单号 → 发票号
-    allow_dash_other_payment: true,
     dealer_code: "89813014812B06R",
 };
 
@@ -231,14 +227,13 @@ fn cell_ratio(cell: &RawCell) -> Result<Option<Decimal>, String> {
         RawCell::Float(f) => Decimal::from_f64(*f)
             .map(Some)
             .ok_or_else(|| format!("数值 {f} 无法转换为比例")),
-        other => Err(format!("比例字段出现非数值内容：{}", cell_display(other))),
+        other => Err(format!("比例字段出现非数值内容：{other}")),
     }
 }
 
-/// 其他支付：允许时把文本`-`原样保留为`Value::Text("-")`，否则按普通数值字段处理。
-fn read_other_payment(cell: &RawCell, allow_dash: bool) -> Result<Value, String> {
-    if allow_dash
-        && let RawCell::Text(t) = cell
+/// 其他支付：把文本`-`原样保留为`Value::Text("-")`，否则按普通数值字段处理。
+fn read_other_payment(cell: &RawCell) -> Result<Value, String> {
+    if let RawCell::Text(t) = cell
         && t.trim() == "-"
     {
         return Ok(Value::Text("-".to_string()));
@@ -251,7 +246,7 @@ fn read_other_payment(cell: &RawCell, allow_dash: bool) -> Result<Value, String>
 /// `核销商编`已在读取阶段按商户号过滤为匹配值，不会经此路径遇到错误值。
 fn cell_text_tolerant(cell: &RawCell) -> Result<String, String> {
     match cell {
-        RawCell::Error(_) => Ok(cell_display(cell)),
+        RawCell::Error(_) => Ok(cell.to_string()),
         other => cell_text(other),
     }
 }
@@ -260,7 +255,6 @@ fn read_row(
     sheet: &SheetGrid,
     row: u32,
     columns: &[Option<u32>],
-    config: &RefundConfig,
     file: &str,
     sheet_name: &str,
 ) -> Result<Vec<Value>, ProcessError> {
@@ -271,13 +265,13 @@ fn read_row(
         let cell = cell_at(index);
         let field = OUTPUT_FIELDS[index];
         let value = if index == OTHER_PAYMENT {
-            read_other_payment(&cell, config.allow_dash_other_payment).map_err(|detail| {
-                data_error(file, sheet_name, row, field, cell_display(&cell), detail)
+            read_other_payment(&cell).map_err(|detail| {
+                data_error(file, sheet_name, row, field, cell.to_string(), detail)
             })?
         } else if index == SUBSIDY_AMOUNT {
             let amount = cell_amount(&cell)
                 .map_err(|detail| {
-                    data_error(file, sheet_name, row, field, cell_display(&cell), detail)
+                    data_error(file, sheet_name, row, field, cell.to_string(), detail)
                 })?
                 .ok_or_else(|| {
                     data_error(
@@ -285,7 +279,7 @@ fn read_row(
                         sheet_name,
                         row,
                         field,
-                        cell_display(&cell),
+                        cell.to_string(),
                         "补贴金额为空或无法解析，不得参与求和".to_string(),
                     )
                 })?;
@@ -294,15 +288,15 @@ fn read_row(
             cell_ratio(&cell)
                 .map(|ratio| ratio.map_or(Value::Empty, Value::Ratio))
                 .map_err(|detail| {
-                    data_error(file, sheet_name, row, field, cell_display(&cell), detail)
+                    data_error(file, sheet_name, row, field, cell.to_string(), detail)
                 })?
         } else if matches!(COLUMN_TYPES[index], ColumnType::Decimal(_)) {
             cell_amount(&cell).map(amount_value).map_err(|detail| {
-                data_error(file, sheet_name, row, field, cell_display(&cell), detail)
+                data_error(file, sheet_name, row, field, cell.to_string(), detail)
             })?
         } else {
             text_value(cell_text_tolerant(&cell).map_err(|detail| {
-                data_error(file, sheet_name, row, field, cell_display(&cell), detail)
+                data_error(file, sheet_name, row, field, cell.to_string(), detail)
             })?)
         };
         values.push(value);
@@ -341,11 +335,13 @@ fn classify_and_sink(records: Vec<Vec<Value>>, priority: [usize; 3]) -> Vec<Row>
         }
     }
 
+    let mut duplicate_members: HashSet<usize> = HashSet::new();
     let mut sink: HashSet<usize> = HashSet::new();
     for indices in groups.values() {
         if indices.len() < 2 {
             continue;
         }
+        duplicate_members.extend(indices.iter().copied());
         let total = indices
             .iter()
             .fold(Decimal::ZERO, |acc, &i| acc + subsidy_amount(&records[i]));
@@ -354,6 +350,11 @@ fn classify_and_sink(records: Vec<Vec<Value>>, priority: [usize; 3]) -> Vec<Row>
         } else {
             let last = *indices.iter().max().unwrap();
             sink.extend(indices.iter().copied().filter(|&i| i != last));
+        }
+    }
+    for (index, values) in records.iter().enumerate() {
+        if !duplicate_members.contains(&index) && subsidy_amount(values) < Decimal::ZERO {
+            sink.insert(index);
         }
     }
 
@@ -395,25 +396,7 @@ fn select_latest_file(candidates: Vec<PathBuf>, suffix: &str) -> Result<PathBuf,
         })
         .collect();
 
-    let max_year = dated.iter().map(|(_, year)| *year).max().unwrap();
-    let mut latest: Vec<_> = dated
-        .into_iter()
-        .filter(|(_, year)| *year == max_year)
-        .collect();
-    if latest.len() > 1 {
-        let names = latest
-            .iter()
-            .filter_map(|(path, _)| path.file_name())
-            .map(|n| n.to_string_lossy().into_owned())
-            .collect::<Vec<_>>()
-            .join("、");
-        return Err(ProcessError::Structure {
-            file: names,
-            sheet: String::new(),
-            detail: "最新年份无法唯一确定：多个文件对应同一最新年份".to_string(),
-        });
-    }
-    Ok(latest.pop().unwrap().0)
+    pick_unique_latest(dated, "最新年份无法唯一确定：多个文件对应同一最新年份")
 }
 
 fn run_refund(config: &RefundConfig, input_dir: &Path) -> Result<Table, ProcessError> {
@@ -473,17 +456,10 @@ fn run_refund(config: &RefundConfig, input_dir: &Path) -> Result<Table, ProcessE
         let dealer_col = columns[DEALER_CODE].expect("核销商编在 required_indices 中");
         let last_row = sheet.last_value_row().unwrap_or(1);
         for row in 2..=last_row {
-            if cell_display(&sheet.cell(row, dealer_col)).trim() != config.dealer_code {
+            if sheet.cell(row, dealer_col).to_string().trim() != config.dealer_code {
                 continue;
             }
-            records.push(read_row(
-                sheet,
-                row,
-                &columns,
-                config,
-                &file_name,
-                &sheet_name,
-            )?);
+            records.push(read_row(sheet, row, &columns, &file_name, &sheet_name)?);
         }
     }
 
@@ -784,7 +760,7 @@ mod tests {
     }
 
     #[test]
-    fn groups_across_sheets_sinks_by_subsidy_total_and_isolates_field_types() {
+    fn groups_across_sheets_and_sinks_standalone_negative_records() {
         let dir = unique_temp_path("refund-grouping");
         std::fs::create_dir_all(&dir).unwrap();
 
@@ -808,22 +784,23 @@ mod tests {
                         appliance_row("E", "UNIQUE1", "", "5.00"), // 单条记录不受影响
                         appliance_row("F", "", "CROSS", "1.00"), // 交易订单号=CROSS
                         appliance_row("G", "CROSS", "", "1.00"), // 商户订单号=CROSS，字段类型不同，不得与 F 同组
+                        appliance_row("H", "UNIQUE2", "", "-5.00"), // 未形成重复组的负数记录沉底
                     ],
                 ),
             ],
         );
 
         let table = REFUND_APPLIANCE.run(&dir).unwrap();
-        assert_eq!(table.rows.len(), 7);
+        assert_eq!(table.rows.len(), 8);
 
         let labels: Vec<&str> = table.rows.iter().map(label_of).collect();
-        assert_eq!(labels, vec!["D", "E", "F", "G", "A", "B", "C"]);
+        assert_eq!(labels, vec!["D", "E", "F", "G", "A", "B", "C", "H"]);
 
         for label in ["D", "E", "F", "G"] {
             let row = table.rows.iter().find(|r| label_of(r) == label).unwrap();
             assert_eq!(row.fill, None, "{label} 不应沉底");
         }
-        for label in ["A", "B", "C"] {
+        for label in ["A", "B", "C", "H"] {
             let row = table.rows.iter().find(|r| label_of(r) == label).unwrap();
             assert_eq!(row.fill, Some(Fill::Pink), "{label} 应沉底");
         }
@@ -852,7 +829,7 @@ mod tests {
     }
 
     #[test]
-    fn other_payment_dash_allowed_only_for_digital() {
+    fn other_payment_dash_is_allowed_for_both_categories() {
         let appliance_dir = unique_temp_path("refund-dash-appliance");
         std::fs::create_dir_all(&appliance_dir).unwrap();
         let mut row = appliance_row("R1", "M1", "T1", "10.00");
@@ -861,8 +838,11 @@ mod tests {
             &appliance_dir.join("2026年以旧换新补贴明细.xlsx"),
             &[("批次一", &APPLIANCE_HEADER, &[row])],
         );
-        let error = REFUND_APPLIANCE.run(&appliance_dir).unwrap_err();
-        assert!(matches!(error, ProcessError::Data { .. }));
+        let table = REFUND_APPLIANCE.run(&appliance_dir).unwrap();
+        assert_eq!(
+            table.rows[0].values[OTHER_PAYMENT],
+            Value::Text("-".to_string())
+        );
         std::fs::remove_dir_all(&appliance_dir).unwrap();
 
         let digital_header: [&str; 14] = [
@@ -904,7 +884,6 @@ mod tests {
             &[("批次一", &digital_header, &[digital_row])],
         );
         let table = REFUND_DIGITAL.run(&digital_dir).unwrap();
-        // 数码允许“其他支付”保留文本“-”，不得改写为 0 或空值。
         assert_eq!(
             table.rows[0].values[OTHER_PAYMENT],
             Value::Text("-".to_string())

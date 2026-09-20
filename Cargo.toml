@@ -5,14 +5,6 @@ edition = "2024"
 rust-version = "1.98"
 publish = false
 
-[lib]
-name = "data_cleaning"
-path = "src/lib.rs"
-
-[[bin]]
-name = "data-cleaning"
-path = "src/main.rs"
-
 [dependencies]
 calamine = { version = "=0.36.1", features = ["dates"] }
 rust_xlsxwriter = { version = "=0.99.1", features = ["chrono", "rust_decimal"] }
@@ -25,4 +17,3 @@ thiserror = "=2.0.20"
 lto = true
 codegen-units = 1
 strip = true
-

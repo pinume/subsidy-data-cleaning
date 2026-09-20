@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use rust_decimal::Decimal;
 use rust_decimal::prelude::FromPrimitive;
@@ -26,11 +26,6 @@ pub trait Job {
     fn title(&self) -> &'static str;
     fn output_stem(&self) -> &'static str;
     fn run(&self, input_dir: &Path) -> Result<Table, ProcessError>;
-}
-
-/// 单元格的通用文本表示，仅用于错误报告与重复导出指纹等诊断用途，不代表最终输出值。
-pub(crate) fn cell_display(cell: &RawCell) -> String {
-    cell.to_string()
 }
 
 /// 文本字段：保留原值（包括纯空白），仅数值型单元格需还原为完整整数文本。
@@ -126,6 +121,44 @@ pub(crate) fn data_error(
     }
 }
 
+/// 日期/日期时间/时间字段的共同骨架：为空时保持为空；有 Excel 序列值或文本但无法
+/// 识别时按数据异常终止。`from_serial`/`from_text`/`to_value`承载各字段类型的差异。
+#[allow(clippy::too_many_arguments)]
+fn parse_temporal_field<T>(
+    cell: &RawCell,
+    field: &str,
+    file: &str,
+    sheet: &str,
+    row: u32,
+    err_label: &str,
+    from_serial: impl FnOnce(f64) -> Option<T>,
+    from_text: impl FnOnce(&str) -> Option<T>,
+    to_value: impl FnOnce(T) -> Value,
+) -> Result<Value, ProcessError> {
+    match cell {
+        RawCell::Empty => Ok(Value::Empty),
+        RawCell::DateTime(serial) => from_serial(*serial).map(to_value).ok_or_else(|| {
+            data_error(
+                file,
+                sheet,
+                row,
+                field,
+                serial.to_string(),
+                err_label.to_string(),
+            )
+        }),
+        other => {
+            let text = other.to_string();
+            if text.trim().is_empty() {
+                return Ok(Value::Empty);
+            }
+            from_text(&text)
+                .map(to_value)
+                .ok_or_else(|| data_error(file, sheet, row, field, text, err_label.to_string()))
+        }
+    }
+}
+
 /// 日期字段：为空时保持为空；非空但无法识别时按数据异常终止。
 pub(crate) fn parse_date_field(
     cell: &RawCell,
@@ -134,32 +167,17 @@ pub(crate) fn parse_date_field(
     sheet: &str,
     row: u32,
 ) -> Result<Value, ProcessError> {
-    match cell {
-        RawCell::Empty => Ok(Value::Empty),
-        RawCell::DateTime(serial) => dates::date_from_serial(*serial)
-            .map(Value::Date)
-            .ok_or_else(|| {
-                data_error(
-                    file,
-                    sheet,
-                    row,
-                    field,
-                    serial.to_string(),
-                    "无法解析为日期".to_string(),
-                )
-            }),
-        other => {
-            let text = other.to_string();
-            if text.trim().is_empty() {
-                return Ok(Value::Empty);
-            }
-            dates::parse_date_text(&text)
-                .map(|dt| Value::Date(dt.date()))
-                .ok_or_else(|| {
-                    data_error(file, sheet, row, field, text, "无法解析为日期".to_string())
-                })
-        }
-    }
+    parse_temporal_field(
+        cell,
+        field,
+        file,
+        sheet,
+        row,
+        "无法解析为日期",
+        dates::date_from_serial,
+        |text| dates::parse_date_text(text).map(|dt| dt.date()),
+        Value::Date,
+    )
 }
 
 /// 日期时间字段：为空时保持为空；非空但无法识别时按数据异常终止。
@@ -170,39 +188,17 @@ pub(crate) fn parse_datetime_field(
     sheet: &str,
     row: u32,
 ) -> Result<Value, ProcessError> {
-    match cell {
-        RawCell::Empty => Ok(Value::Empty),
-        RawCell::DateTime(serial) => dates::datetime_from_serial(*serial)
-            .map(Value::DateTime)
-            .ok_or_else(|| {
-                data_error(
-                    file,
-                    sheet,
-                    row,
-                    field,
-                    serial.to_string(),
-                    "无法解析为日期时间".to_string(),
-                )
-            }),
-        other => {
-            let text = other.to_string();
-            if text.trim().is_empty() {
-                return Ok(Value::Empty);
-            }
-            dates::parse_date_text(&text)
-                .map(Value::DateTime)
-                .ok_or_else(|| {
-                    data_error(
-                        file,
-                        sheet,
-                        row,
-                        field,
-                        text,
-                        "无法解析为日期时间".to_string(),
-                    )
-                })
-        }
-    }
+    parse_temporal_field(
+        cell,
+        field,
+        file,
+        sheet,
+        row,
+        "无法解析为日期时间",
+        dates::datetime_from_serial,
+        dates::parse_date_text,
+        Value::DateTime,
+    )
 }
 
 /// 时间字段：为空时保持为空；非空但无法识别时按数据异常终止。
@@ -213,32 +209,17 @@ pub(crate) fn parse_time_field(
     sheet: &str,
     row: u32,
 ) -> Result<Value, ProcessError> {
-    match cell {
-        RawCell::Empty => Ok(Value::Empty),
-        RawCell::DateTime(serial) => dates::time_from_serial(*serial)
-            .map(Value::Time)
-            .ok_or_else(|| {
-                data_error(
-                    file,
-                    sheet,
-                    row,
-                    field,
-                    serial.to_string(),
-                    "无法解析为时间".to_string(),
-                )
-            }),
-        other => {
-            let text = other.to_string();
-            if text.trim().is_empty() {
-                return Ok(Value::Empty);
-            }
-            dates::parse_time_text(&text)
-                .map(Value::Time)
-                .ok_or_else(|| {
-                    data_error(file, sheet, row, field, text, "无法解析为时间".to_string())
-                })
-        }
-    }
+    parse_temporal_field(
+        cell,
+        field,
+        file,
+        sheet,
+        row,
+        "无法解析为时间",
+        dates::time_from_serial,
+        dates::parse_time_text,
+        Value::Time,
+    )
 }
 
 /// 在表头中查找某统一字段的实际列号：候选同义词中恰好一个出现时返回该列号；
@@ -327,6 +308,32 @@ pub(crate) fn check_duplicate_fingerprint(
         .entry(fingerprint)
         .or_insert_with(|| file_name.to_string());
     Ok(())
+}
+
+/// 在`(路径, 排序键)`候选中选择键最大的唯一一项；键并列时判定为无法唯一确定并报错。
+pub(crate) fn pick_unique_latest<K: Ord + Copy>(
+    dated: Vec<(PathBuf, K)>,
+    ambiguous_detail: &str,
+) -> Result<PathBuf, ProcessError> {
+    let max_key = dated.iter().map(|(_, key)| *key).max().unwrap();
+    let mut latest: Vec<_> = dated
+        .into_iter()
+        .filter(|(_, key)| *key == max_key)
+        .collect();
+    if latest.len() > 1 {
+        let names = latest
+            .iter()
+            .filter_map(|(path, _)| path.file_name())
+            .map(|n| n.to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+            .join("、");
+        return Err(ProcessError::Structure {
+            file: names,
+            sheet: String::new(),
+            detail: ambiguous_detail.to_string(),
+        });
+    }
+    Ok(latest.pop().unwrap().0)
 }
 
 pub mod coupons;

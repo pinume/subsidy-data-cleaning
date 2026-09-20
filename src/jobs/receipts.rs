@@ -5,8 +5,7 @@ use crate::io::xlsx_reader::{SheetGrid, open_sheets};
 use crate::model::{Column, ColumnType, ProcessError, Row, Table, Value};
 
 use super::{
-    Category, Job, build_match_doc_no, cell_display, cell_text, data_error, parse_date_field,
-    text_value,
+    Category, Job, build_match_doc_no, cell_text, data_error, parse_date_field, text_value,
 };
 
 const FILE_NAME: &str = "收款单统计.xlsx";
@@ -149,7 +148,7 @@ pub(crate) fn load_records(input_dir: &Path) -> Result<Vec<ReceiptRecord>, Proce
     }
 
     let last_row = sheet.last_value_row().unwrap_or(2);
-    let total_marker = cell_display(&sheet.cell(last_row, 1));
+    let total_marker = sheet.cell(last_row, 1).to_string();
     if total_marker != "合计" {
         return Err(ProcessError::Structure {
             file: FILE_NAME.to_string(),
@@ -179,7 +178,7 @@ fn read_row(
     let text_at = |col: u32, field: &'static str| -> Result<String, ProcessError> {
         let cell = sheet.cell(row, col);
         cell_text(&cell)
-            .map_err(|detail| data_error(file, sheet_name, row, field, cell_display(&cell), detail))
+            .map_err(|detail| data_error(file, sheet_name, row, field, cell.to_string(), detail))
     };
 
     let doc_no_value = text_at(COL_DOC_NO, "单据号")?;

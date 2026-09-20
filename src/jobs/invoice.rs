@@ -10,7 +10,9 @@ use crate::io::xlsx_reader::open_sheets;
 use crate::model::{Column, ColumnType, Fill, ProcessError, Row, Table, Value};
 use crate::utils::{dates, doc_no};
 
-use super::{Category, Job, cell_display, cell_text, data_error, parse_datetime_field, text_value};
+use super::{
+    Category, Job, cell_text, data_error, parse_datetime_field, pick_unique_latest, text_value,
+};
 
 pub(crate) const SOURCE_HEADERS: [&str; 30] = [
     "订单号",
@@ -102,25 +104,7 @@ fn select_latest_file(input_dir: &Path) -> Result<PathBuf, ProcessError> {
         });
     }
 
-    let max_date = dated.iter().map(|(_, date)| *date).max().unwrap();
-    let mut latest: Vec<_> = dated
-        .into_iter()
-        .filter(|(_, date)| *date == max_date)
-        .collect();
-    if latest.len() > 1 {
-        let names = latest
-            .iter()
-            .filter_map(|(path, _)| path.file_name())
-            .map(|name| name.to_string_lossy().into_owned())
-            .collect::<Vec<_>>()
-            .join("、");
-        return Err(ProcessError::Structure {
-            file: names,
-            sheet: String::new(),
-            detail: "最新日期无法唯一确定：多个文件对应同一最新日期".to_string(),
-        });
-    }
-    Ok(latest.pop().unwrap().0)
+    pick_unique_latest(dated, "最新日期无法唯一确定：多个文件对应同一最新日期")
 }
 
 /// 以最后一个半角星号为分隔符，仅保留星号后的商品名称；不含星号时保持不变。
@@ -278,66 +262,26 @@ pub(crate) fn load_records(input_dir: &Path) -> Result<Vec<InvoiceRecord>, Proce
             row,
         )?;
 
-        let invoice_type = cell_text(&sheet.cell(row, 4)).map_err(|detail| {
-            data_error(
-                &file_name,
-                &sheet_name,
-                row,
-                "开票类型",
-                cell_display(&sheet.cell(row, 4)),
-                detail,
-            )
-        })?;
-        let invoice_no = cell_text(&sheet.cell(row, 9)).map_err(|detail| {
-            data_error(
-                &file_name,
-                &sheet_name,
-                row,
-                "数电发票号码",
-                cell_display(&sheet.cell(row, 9)),
-                detail,
-            )
-        })?;
-        let buyer_name = cell_text(&sheet.cell(row, 10)).map_err(|detail| {
-            data_error(
-                &file_name,
-                &sheet_name,
-                row,
-                "购方名称",
-                cell_display(&sheet.cell(row, 10)),
-                detail,
-            )
-        })?;
-        let raw_product_name = cell_text(&sheet.cell(row, 16)).map_err(|detail| {
-            data_error(
-                &file_name,
-                &sheet_name,
-                row,
-                "主要商品名称",
-                cell_display(&sheet.cell(row, 16)),
-                detail,
-            )
-        })?;
-        let remark = cell_text(&sheet.cell(row, 21)).map_err(|detail| {
-            data_error(
-                &file_name,
-                &sheet_name,
-                row,
-                "备注信息",
-                cell_display(&sheet.cell(row, 21)),
-                detail,
-            )
-        })?;
-        let invoice_status = cell_text(&sheet.cell(row, 28)).map_err(|detail| {
-            data_error(
-                &file_name,
-                &sheet_name,
-                row,
-                "开票状态",
-                cell_display(&sheet.cell(row, 28)),
-                detail,
-            )
-        })?;
+        let text_at = |col: u32, field: &'static str| -> Result<String, ProcessError> {
+            let cell = sheet.cell(row, col);
+            cell_text(&cell).map_err(|detail| {
+                data_error(
+                    &file_name,
+                    &sheet_name,
+                    row,
+                    field,
+                    cell.to_string(),
+                    detail,
+                )
+            })
+        };
+
+        let invoice_type = text_at(4, "开票类型")?;
+        let invoice_no = text_at(9, "数电发票号码")?;
+        let buyer_name = text_at(10, "购方名称")?;
+        let raw_product_name = text_at(16, "主要商品名称")?;
+        let remark = text_at(21, "备注信息")?;
+        let invoice_status = text_at(28, "开票状态")?;
 
         records.push(InvoiceRecord {
             issue_time,
