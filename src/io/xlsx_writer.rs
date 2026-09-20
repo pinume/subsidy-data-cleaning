@@ -1,18 +1,34 @@
 use std::path::Path;
 
-use rust_xlsxwriter::{Color, Format, Workbook};
+use rust_xlsxwriter::{Color, Format, FormatAlign, FormatBorder, Workbook};
 
 use crate::model::{Column, ColumnType, DecimalScale, Fill, ProcessError, Table, Value};
 
 fn base_format(ty: ColumnType) -> Format {
+    let format = Format::new()
+        .set_font_name("微软雅黑")
+        .set_font_size(11)
+        .set_align(FormatAlign::VerticalCenter)
+        .set_border(FormatBorder::Thin)
+        .set_border_color(Color::RGB(0xD9D9D9));
+
     match ty {
-        ColumnType::Text | ColumnType::Decimal(DecimalScale::Original) => Format::new(),
-        ColumnType::Decimal(DecimalScale::Two) => Format::new().set_num_format("0.00"),
-        ColumnType::Integer => Format::new().set_num_format("0"),
-        ColumnType::Ratio => Format::new().set_num_format("0.00%"),
-        ColumnType::Date => Format::new().set_num_format("yyyy-mm-dd"),
-        ColumnType::Time => Format::new().set_num_format("hh:mm:ss"),
-        ColumnType::DateTime => Format::new().set_num_format("yyyy-mm-dd hh:mm:ss"),
+        ColumnType::Text => format.set_align(FormatAlign::Left),
+        ColumnType::Decimal(DecimalScale::Original) => format.set_align(FormatAlign::Right),
+        ColumnType::Decimal(DecimalScale::Two) => {
+            format.set_num_format("0.00").set_align(FormatAlign::Right)
+        }
+        ColumnType::Integer => format.set_num_format("0").set_align(FormatAlign::Right),
+        ColumnType::Ratio => format.set_num_format("0.00%").set_align(FormatAlign::Right),
+        ColumnType::Date => format
+            .set_num_format("yyyy-mm-dd")
+            .set_align(FormatAlign::Center),
+        ColumnType::Time => format
+            .set_num_format("hh:mm:ss")
+            .set_align(FormatAlign::Center),
+        ColumnType::DateTime => format
+            .set_num_format("yyyy-mm-dd hh:mm:ss")
+            .set_align(FormatAlign::Center),
     }
 }
 
@@ -32,10 +48,28 @@ pub fn write_table(table: &Table, path: &Path) -> Result<(), ProcessError> {
 
     let mut workbook = Workbook::new();
     let worksheet = workbook.add_worksheet();
+    let header_format = Format::new()
+        .set_font_name("微软雅黑")
+        .set_font_size(11)
+        .set_bold()
+        .set_font_color(Color::White)
+        .set_background_color(Color::RGB(0x5B9BD5))
+        .set_align(FormatAlign::Left)
+        .set_align(FormatAlign::VerticalCenter)
+        .set_border(FormatBorder::Thin)
+        .set_border_color(Color::RGB(0xD9D9D9));
+
+    worksheet.set_default_row_height(22);
+    worksheet
+        .set_row_height(0, 30)
+        .map_err(|error| ProcessError::Io(std::io::Error::other(error)))?;
+    worksheet
+        .set_freeze_panes(1, 0)
+        .map_err(|error| ProcessError::Io(std::io::Error::other(error)))?;
 
     for (col_index, column) in table.columns.iter().enumerate() {
         worksheet
-            .write_string(0, col_index as u16, column.name)
+            .write_string_with_format(0, col_index as u16, column.name, &header_format)
             .map_err(|error| ProcessError::Io(std::io::Error::other(error)))?;
     }
 
@@ -71,6 +105,40 @@ pub fn write_table(table: &Table, path: &Path) -> Result<(), ProcessError> {
             };
             result.map_err(|error| ProcessError::Io(std::io::Error::other(error)))?;
         }
+    }
+
+    worksheet
+        .set_autofit_max_row(200)
+        .set_autofit_max_width(300)
+        .autofit();
+
+    let widths: &[f64] = match table.columns.as_slice() {
+        columns
+            if columns.len() == 26
+                && columns[0].name == "清算时间"
+                && columns[25].name == "买家ID" =>
+        {
+            &[
+                20.0, 20.0, 14.0, 12.0, 22.0, 14.0, 14.0, 12.0, 12.0, 12.0, 16.0, 18.0, 12.0, 16.0,
+                18.0, 24.0, 16.0, 28.0, 28.0, 14.0, 16.0, 14.0, 14.0, 14.0, 16.0, 18.0,
+            ]
+        }
+        columns
+            if columns.len() == 24
+                && columns[0].name == "拨付批次"
+                && columns[23].name == "原拨付批次" =>
+        {
+            &[
+                32.0, 20.0, 16.0, 26.0, 26.0, 22.0, 18.0, 14.0, 14.0, 14.0, 14.0, 12.0, 24.0, 14.0,
+                16.0, 12.0, 16.0, 36.0, 14.0, 24.0, 18.0, 24.0, 48.0, 18.0,
+            ]
+        }
+        _ => &[],
+    };
+    for (col, width) in widths.iter().enumerate() {
+        worksheet
+            .set_column_width(col as u16, *width)
+            .map_err(|error| ProcessError::Io(std::io::Error::other(error)))?;
     }
 
     workbook
